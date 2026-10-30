@@ -15,9 +15,22 @@ Make and CMake are not used.
 CUDA_HOME=/usr/local/cuda NCCL_HOME=/path/to/nccl ./build.sh
 ```
 
-The executable is `build/sendrecv_perf`. Each invocation recompiles all required
+With no target arguments, the script builds `build/sendrecv_perf` and, when
+`MPI=1`, `build/sample`. Each invocation recompiles the selected targets' required
 sources. If NCCL is installed in the compiler's default search paths, omit
 `NCCL_HOME`. It should otherwise contain `include/nccl.h` and `lib` or `lib64`.
+
+Select one or both build targets with positional arguments:
+
+```sh
+./build.sh sendrecv_perf
+MPI=1 MPI_HOME=/path/to/mpi ./build.sh sample
+MPI=1 MPI_HOME=/path/to/mpi ./build.sh sample sendrecv_perf
+```
+
+Add `CUDA_HOME` and `NCCL_HOME` as needed. Explicitly selecting `sample` requires
+`MPI=1` and `MPI_HOME`; otherwise the script fails. Unselected executables already
+in the output directory are left in place. Use `./build.sh --help` for usage.
 
 Environment variables:
 
@@ -30,7 +43,7 @@ Environment variables:
 | `NCCL_HOME` | unset | NCCL installation |
 | `BUILDDIR` | repository `build/` | Output directory; relative paths use the current directory |
 | `CUDA_ARCHS` | selected by CUDA version | Space-separated GPU architecture numbers, e.g. `80 90` |
-| `MPI` | `0` | Set to `1` to enable MPI and also build `sample` |
+| `MPI` | `0` | Set to `1` to enable MPI; required for `sample` |
 | `MPI_HOME` | unset | MPI installation with `include` and `lib` or `lib64`; required for `MPI=1` |
 
 To build for a specific GPU architecture:

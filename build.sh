@@ -1,11 +1,24 @@
 #!/usr/bin/env bash
-# Build sendrecv_perf and, with MPI=1, sample on Linux without Make or CMake.
+# Build selected targets on Linux without Make or CMake.
 set -euo pipefail
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-if [[ $# != 0 ]]; then
-  echo 'Usage: [CUDA_HOME=...] [NCCL_HOME=...] [MPI=1 MPI_HOME=...] ./build.sh' >&2
-  exit 1
+usage() {
+  echo 'Usage: [CUDA_HOME=...] [NCCL_HOME=...] [MPI=1 MPI_HOME=...] ./build.sh [sample] [sendrecv_perf]'
+}
+build_sample=0
+build_sendrecv=0
+explicit_targets=0
+if [[ $# -gt 0 ]]; then
+  explicit_targets=1
+  for target in "$@"; do
+    case "$target" in
+      sample) build_sample=1 ;;
+      sendrecv_perf) build_sendrecv=1 ;;
+      -h|--help) usage; exit 0 ;;
+      *) echo "Unknown build target: $target" >&2; usage >&2; exit 1 ;;
+    esac
+  done
 fi
 [[ $(uname -s) == Linux ]] || { echo 'build.sh requires Linux.' >&2; exit 1; }
 CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
@@ -14,6 +27,13 @@ CXX=${CXX:-g++}
 BUILDDIR=${BUILDDIR:-$root/build}
 MPI=${MPI:-0}
 [[ $MPI == 0 || $MPI == 1 ]] || { echo 'MPI must be 0 or 1.' >&2; exit 1; }
+if [[ $explicit_targets == 0 ]]; then
+  build_sendrecv=1
+  build_sample=$MPI
+elif [[ $build_sample == 1 && $MPI != 1 ]]; then
+  echo 'Building sample requires MPI=1 and MPI_HOME.' >&2
+  exit 1
+fi
 for compiler in "$NVCC" "$CXX"; do
   command -v "$compiler" >/dev/null || { echo "Compiler not found: $compiler" >&2; exit 1; }
 done
@@ -59,29 +79,31 @@ if [[ $MPI == 1 ]]; then
   libs+=("-L$MPI_HOME/lib" "-L$MPI_HOME/lib64" -lmpi)
 fi
 mkdir -p -- "$BUILDDIR/obj/include"
-version=$(git -C "$root" describe --dirty --always --exclude '*' 2>/dev/null || echo unknown)
-printf '#define NCCL_TESTS_GIT_VERSION "%s"\n' "$version" > "$BUILDDIR/obj/include/nccl_tests_git_version.h"
-objects=()
-for source in src/sendrecv.cu src/common.cu src/util.cu; do
-  object="$BUILDDIR/obj/$(basename "${source%.cu}").o"
-  printf 'Compiling %s\n' "$source"
-  "$NVCC" -ccbin "$CXX" "${flags[@]}" "${gencode[@]}" --extended-lambda --expt-relaxed-constexpr \
-    -Xcompiler -pthread -c "$root/$source" -o "$object"
-  objects+=("$object")
-done
-for source in src/timer.cc os/linux.cc; do
-  object="$BUILDDIR/obj/$(basename "${source%.cc}").o"
-  printf 'Compiling %s\n' "$source"
-  "$CXX" "${flags[@]}" -pthread -c "$root/$source" -o "$object"
-  objects+=("$object")
-done
-"$NVCC" -ccbin "$CXX" "${objects[@]}" "${libs[@]}" -Xlinker --export-dynamic -o "$BUILDDIR/sendrecv_perf"
-printf 'Built %s/sendrecv_perf\n' "$BUILDDIR"
-if [[ $MPI == 1 ]]; then
+if [[ $build_sendrecv == 1 ]]; then
+  version=$(git -C "$root" describe --dirty --always --exclude '*' 2>/dev/null || echo unknown)
+  printf '#define NCCL_TESTS_GIT_VERSION "%s"\n' "$version" > "$BUILDDIR/obj/include/nccl_tests_git_version.h"
+  objects=()
+  for source in src/sendrecv.cu src/common.cu src/util.cu; do
+    object="$BUILDDIR/obj/$(basename "${source%.cu}").o"
+    printf 'Compiling %s\n' "$source"
+    "$NVCC" -ccbin "$CXX" "${flags[@]}" "${gencode[@]}" --extended-lambda --expt-relaxed-constexpr \
+      -Xcompiler -pthread -c "$root/$source" -o "$object"
+    objects+=("$object")
+  done
+  for source in src/timer.cc os/linux.cc; do
+    object="$BUILDDIR/obj/$(basename "${source%.cc}").o"
+    printf 'Compiling %s\n' "$source"
+    "$CXX" "${flags[@]}" -pthread -c "$root/$source" -o "$object"
+    objects+=("$object")
+  done
+  "$NVCC" -ccbin "$CXX" "${objects[@]}" "${libs[@]}" -Xlinker --export-dynamic -o "$BUILDDIR/sendrecv_perf"
+  printf 'Built %s/sendrecv_perf\n' "$BUILDDIR"
+fi
+if [[ $build_sample == 1 ]]; then
   printf 'Compiling src/sample.cu\n'
   "$NVCC" -ccbin "$CXX" "${flags[@]}" "${gencode[@]}" -Xcompiler -pthread \
     "$root/src/sample.cu" "${libs[@]}" -o "$BUILDDIR/sample"
   printf 'Built %s/sample\n' "$BUILDDIR"
-else
+elif [[ $explicit_targets == 0 ]]; then
   printf 'Skipping sample (requires MPI=1 and MPI_HOME).\n'
 fi
