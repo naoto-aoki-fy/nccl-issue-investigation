@@ -121,7 +121,7 @@ Environment variables may override communicator settings.
 | `--graph-usage-mode` | `0`, `default`, `1`, `2` | Set communicator graph usage mode (NCCL 2.29+). |
 | `--stream` | `nonblocking`, `blocking` | Set CUDA stream flags; `blocking` creates a regular stream. |
 | `--wait` | `poll`, `stream`, `event` | Wait after measurement via stream query and yield, `cudaStreamSynchronize`, or `cudaEventSynchronize`. Event wait records a stop event even in CPU timing mode. |
-| `--event-blocking-sync` | `0`, `1` | Create the stop event with `cudaEventBlockingSync` when set to 1, allowing the CPU thread to sleep during `--wait event`. Event timing remains enabled; this does not change stream synchronization. |
+| `--blocking-sync` | `0`, `1` | When set to 1, use `cudaDeviceScheduleBlockingSync` with `--wait stream` or create the stop event with `cudaEventBlockingSync` for `--wait event`, allowing the CPU thread to sleep during synchronization. Event timing remains enabled. |
 | `--poll-yield` | `1`, `0` | Enable or disable `std::this_thread::yield()` in polling waits, including warmup. Async error checks remain enabled. Has no effect on stream/event waits. |
 | `--warmup-wait` | `poll`, `stream` | Select the completion wait after warmup. |
 | `--pre-log` | `before`, `after` | Place the measurement-start log before or after the measurement barrier. The log is outside the local CPU timing interval. |
@@ -141,8 +141,8 @@ launcher, placement, and environment for every run):
 ```sh
 mpirun -np 2 ./build/sample -s 4M -w 20 -n 1
 mpirun -np 2 ./build/sample -s 4M -w 20 -n 1 --wait stream
-mpirun -np 2 ./build/sample -s 4M -w 20 -n 1 --wait event --event-blocking-sync 0
-mpirun -np 2 ./build/sample -s 4M -w 20 -n 1 --wait event --event-blocking-sync 1
+mpirun -np 2 ./build/sample -s 4M -w 20 -n 1 --wait event --blocking-sync 0
+mpirun -np 2 ./build/sample -s 4M -w 20 -n 1 --wait event --blocking-sync 1
 mpirun -np 2 ./build/sample -s 4M -w 20 -n 1 --wait poll --poll-yield 0
 mpirun -np 2 ./build/sample -s 4M -w 20 -n 1 --pre-log after
 mpirun -np 2 ./build/sample -s 4M -w 20 -n 1 --max-p2p-peers default
