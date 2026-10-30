@@ -153,7 +153,7 @@ static void usage(const char* program) {
         "  --graph-usage-mode VALUE  default, 0, 1 or 2 (default: 0; NCCL 2.29+)\n"
         "  --stream MODE          nonblocking (default) or blocking\n"
         "  --wait MODE            poll (default), stream or event\n"
-        "  --event-blocking-sync VALUE  0 (default) or 1; block CPU in event wait\n"
+        "  --blocking-sync VALUE  0 (default) or 1; block CPU in stream/event wait\n"
         "  --poll-yield VALUE     1 (default) or 0; yield in measurement/warmup polling\n"
         "  --warmup-wait MODE     poll (default) or stream\n"
         "  --pre-log POSITION     before (default) or after the measurement barrier\n"
@@ -191,13 +191,13 @@ int main(int argc, char** argv) {
     std::string comm_init = "config", max_peers = "2", nvlink_sched = "1", graph_mode = "0";
     std::string stream_mode = "nonblocking", wait_mode = "poll", warmup_wait = "poll", pre_log = "before";
     std::string timing_mode = "cpu", rank_report = "both";
-    bool event_blocking_sync = false, poll_yield = true;
+    bool blocking_sync = false, poll_yield = true;
     bool max_peers_explicit = false, nvlink_explicit = false, graph_explicit = false;
     std::string parse_error;
 
     opterr = 0;
     enum { OPT_COMM_INIT = 256, OPT_MAX_PEERS, OPT_NVLINK, OPT_GRAPH,
-           OPT_STREAM, OPT_WAIT, OPT_EVENT_BLOCKING_SYNC, OPT_POLL_YIELD, OPT_WARMUP_WAIT, OPT_PRE_LOG, OPT_TIMING, OPT_RANK_REPORT };
+           OPT_STREAM, OPT_WAIT, OPT_BLOCKING_SYNC, OPT_POLL_YIELD, OPT_WARMUP_WAIT, OPT_PRE_LOG, OPT_TIMING, OPT_RANK_REPORT };
     const option long_options[] = {
         {"comm-init", required_argument, nullptr, OPT_COMM_INIT},
         {"max-p2p-peers", required_argument, nullptr, OPT_MAX_PEERS},
@@ -205,7 +205,7 @@ int main(int argc, char** argv) {
         {"graph-usage-mode", required_argument, nullptr, OPT_GRAPH},
         {"stream", required_argument, nullptr, OPT_STREAM},
         {"wait", required_argument, nullptr, OPT_WAIT},
-        {"event-blocking-sync", required_argument, nullptr, OPT_EVENT_BLOCKING_SYNC},
+        {"blocking-sync", required_argument, nullptr, OPT_BLOCKING_SYNC},
         {"poll-yield", required_argument, nullptr, OPT_POLL_YIELD},
         {"warmup-wait", required_argument, nullptr, OPT_WARMUP_WAIT},
         {"pre-log", required_argument, nullptr, OPT_PRE_LOG},
@@ -282,10 +282,10 @@ int main(int argc, char** argv) {
             wait_mode = optarg;
             if (wait_mode != "poll" && wait_mode != "stream" && wait_mode != "event") parse_error = "invalid --wait (poll, stream or event)";
             break;
-        case OPT_EVENT_BLOCKING_SYNC:
+        case OPT_BLOCKING_SYNC:
             if (std::string(optarg) != "0" && std::string(optarg) != "1")
-                parse_error = "invalid --event-blocking-sync (0 or 1)";
-            else event_blocking_sync = std::string(optarg) == "1";
+                parse_error = "invalid --blocking-sync (0 or 1)";
+            else blocking_sync = std::string(optarg) == "1";
             break;
         case OPT_POLL_YIELD:
             if (std::string(optarg) != "0" && std::string(optarg) != "1")
@@ -375,8 +375,8 @@ int main(int argc, char** argv) {
     LOG("Measurement configuration: iterations=%d timing=%s rank-report=%s wait=%s warmup-wait=%s pre-log=%s stream=%s",
         iters, timing_mode.c_str(), rank_report.c_str(), wait_mode.c_str(),
         warmup_wait.c_str(), pre_log.c_str(), stream_mode.c_str());
-    LOG("Wait configuration: event-blocking-sync=%d poll-yield=%d",
-        static_cast<int>(event_blocking_sync), static_cast<int>(poll_yield));
+    LOG("Wait configuration: blocking-sync=%d poll-yield=%d",
+        static_cast<int>(blocking_sync), static_cast<int>(poll_yield));
     LOG("Warmup configuration: %d iterations, %zu bytes (%.2f MiB), elements=%zu float",
         warmup_iters, warmup_bytes, static_cast<double>(warmup_bytes) / MiB, warmup_count);
 
@@ -399,6 +399,9 @@ int main(int argc, char** argv) {
     }
     CUDACHECK(cudaSetDevice(localRank));
     g_gpu = localRank;
+    if (wait_mode == "stream" && blocking_sync) {
+        CUDACHECK(cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync));
+    }
 
     cudaDeviceProp prop;
     CUDACHECK(cudaGetDeviceProperties(&prop, localRank));
@@ -452,7 +455,7 @@ int main(int argc, char** argv) {
     if (measure_event) CUDACHECK(cudaEventCreate(&start_event));
     if (need_stop_event) {
         CUDACHECK(cudaEventCreateWithFlags(&stop_event,
-            event_blocking_sync ? cudaEventBlockingSync : cudaEventDefault));
+            blocking_sync ? cudaEventBlockingSync : cudaEventDefault));
     }
 
     float *d_send = nullptr, *d_recv = nullptr;
