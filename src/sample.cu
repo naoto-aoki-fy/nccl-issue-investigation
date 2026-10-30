@@ -12,13 +12,14 @@
 #include <limits>
 #include <new>
 #include <string>
+#include <thread>
 #include <vector>
 
 static int g_rank = -1;
 static int g_gpu = -1;
 static std::chrono::steady_clock::time_point g_start;
 
-// CPU-side progress log. GPU transfer time is measured separately with CUDA events.
+// CPU-side progress log; no logging is performed during the benchmark.
 static void log_message(const char* fmt, ...) {
     double elapsed = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - g_start).count();
@@ -97,8 +98,8 @@ static bool parse_buffer_size(const char* text, size_t* bytes) {
     return true;
 }
 
-// Number of untimed warmup iterations (0 disables warmup).
-static bool parse_warmup_count(const char* text, int* count) {
+// Iteration counts are nonnegative; measured iterations must also be nonzero.
+static bool parse_iteration_count(const char* text, int* count) {
     if (!text || !*text || *text < '0' || *text > '9') return false;
     errno = 0;
     char* end = nullptr;
@@ -109,13 +110,30 @@ static bool parse_warmup_count(const char* text, int* count) {
     return true;
 }
 
+// Match sendrecv_perf's completion polling, including async error checks and
+// yielding the CPU so NCCL proxy threads can make progress.
+static void wait_for_transfer(cudaStream_t stream, ncclComm_t comm) {
+    for (;;) {
+        cudaError_t status = cudaStreamQuery(stream);
+        if (status == cudaSuccess) return;
+        if (status != cudaErrorNotReady) CUDACHECK(status);
+#if NCCL_VERSION_CODE >= NCCL_VERSION(2, 4, 0)
+        ncclResult_t async_error;
+        NCCLCHECK(ncclCommGetAsyncError(comm, &async_error));
+        NCCLCHECK(async_error);
+#endif
+        std::this_thread::yield();
+    }
+}
+
 static void usage(const char* program) {
     fprintf(stderr,
-        "Usage: %s [-s SIZE] [-w WARMUP] [-W SIZE] [-A nccl|cuda] [-h]\n"
+        "Usage: %s [-s SIZE] [-n ITERS] [-w WARMUP] [-W SIZE] [-A nccl|cuda] [-h]\n"
         "  -s SIZE  Size of EACH GPU send/recv buffer (default: 4M)\n"
         "           No suffix: bytes; K/M/G: powers of 1024\n"
         "           Examples: -s 4096, -s 64K, -s 4M, -s 1G\n"
         "           Must be positive and divisible by sizeof(float)=4\n"
+        "  -n N     Measured iterations (default: 20; must be positive)\n"
         "  -w N     Untimed warmup iterations (default: 1; 0 disables)\n"
         "  -W SIZE  Size of EACH warmup send/recv (default: same as -s)\n"
         "  -A TYPE  GPU buffer allocator: nccl (default) or cuda\n"
@@ -142,6 +160,7 @@ int main(int argc, char** argv) {
 
     // Every rank parses arguments and exits collectively on a CLI error or -h.
     size_t bytes = 4ULL * 1024 * 1024;
+    int iters = 20;
     int warmup_iters = 1;
     size_t warmup_bytes = 0;
     bool warmup_size_specified = false;
@@ -151,15 +170,20 @@ int main(int argc, char** argv) {
 
     opterr = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "s:w:W:A:h")) != -1) {
+    while ((opt = getopt(argc, argv, "s:n:w:W:A:h")) != -1) {
         switch (opt) {
         case 's':
             if (!parse_buffer_size(optarg, &bytes)) {
                 parse_error = "invalid -s SIZE (positive, multiple of 4, optional K/M/G)";
             }
             break;
+        case 'n':
+            if (!parse_iteration_count(optarg, &iters) || iters == 0) {
+                parse_error = "invalid -n N (positive integer)";
+            }
+            break;
         case 'w':
-            if (!parse_warmup_count(optarg, &warmup_iters)) {
+            if (!parse_iteration_count(optarg, &warmup_iters)) {
                 parse_error = "invalid -w N (nonnegative integer)";
             }
             break;
@@ -232,6 +256,7 @@ int main(int argc, char** argv) {
     constexpr double MiB = 1024.0 * 1024.0;
     LOG("Configuration: buffer=%zu bytes (%.2f MiB), elements=%zu float",
         bytes, static_cast<double>(bytes) / MiB, count);
+    LOG("Measurement configuration: %d consecutive iterations, CPU wall-clock timing", iters);
     LOG("Warmup configuration: %d iterations, %zu bytes (%.2f MiB), elements=%zu float",
         warmup_iters, warmup_bytes, static_cast<double>(warmup_bytes) / MiB, warmup_count);
 
@@ -269,16 +294,27 @@ int main(int argc, char** argv) {
 
     LOG("Initializing NCCL communicator");
     ncclComm_t comm;
+#if NCCL_VERSION_CODE >= NCCL_VERSION(2, 14, 0)
+    ncclConfig_t config = NCCL_CONFIG_INITIALIZER;
+    // Keep the normal, non-graph sendrecv_perf communicator settings.
+#if NCCL_VERSION_CODE >= NCCL_VERSION(2, 28, 0)
+    config.nvlinkCentricSched = 1;
+#endif
+#if NCCL_VERSION_CODE >= NCCL_VERSION(2, 29, 0)
+    config.graphUsageMode = 0;
+#endif
+#if NCCL_VERSION_CODE >= NCCL_VERSION(2, 30, 0)
+    config.maxP2pPeers = 2;
+#endif
+    NCCLCHECK(ncclCommInitRankConfig(&comm, nranks, id, rank, &config));
+#else
     NCCLCHECK(ncclCommInitRank(&comm, nranks, id, rank));
+#endif
     LOG("NCCL communicator initialized");
 
-    LOG("Creating CUDA stream and timing events");
+    LOG("Creating nonblocking CUDA stream");
     cudaStream_t stream;
-    CUDACHECK(cudaStreamCreate(&stream));
-
-    cudaEvent_t startEvent, stopEvent;
-    CUDACHECK(cudaEventCreate(&startEvent));
-    CUDACHECK(cudaEventCreate(&stopEvent));
+    CUDACHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
 
     float *d_send = nullptr, *d_recv = nullptr;
     // One pair of buffers is reused; allocate enough for either transfer size.
@@ -318,7 +354,7 @@ int main(int argc, char** argv) {
     MPICHECK(MPI_Barrier(MPI_COMM_WORLD));
     LOG("MPI barrier completed");
 
-    // Run the same communication as the timed path, outside CUDA events.
+    // Run the same communication as the timed path, outside the timed region.
     // This allows NCCL to establish P2P connections and initialize kernels.
     LOG("Warming up NCCL send/recv: %d iterations, %.2f MiB each direction",
         warmup_iters, static_cast<double>(warmup_bytes) / MiB);
@@ -329,40 +365,41 @@ int main(int argc, char** argv) {
         NCCLCHECK(ncclGroupEnd());
     }
     // Ensure ALL warmup GPU work has finished before starting timing.
-    CUDACHECK(cudaStreamSynchronize(stream));
-    // Align ranks before measurement (barrier itself is not timed).
-    MPICHECK(MPI_Barrier(MPI_COMM_WORLD));
-    LOG("Warmup complete; starting measured transfer");
-
-    // Both event records use exactly the same CUDA stream as the NCCL calls.
-    // Do not print or enqueue other work between the NCCL group and stopEvent.
-    LOG("Starting NCCL transfer: %.2f MiB TX + %.2f MiB RX (CUDA events)",
+    wait_for_transfer(stream, comm);
+    LOG("Starting %d consecutive NCCL transfers: %.2f MiB TX + %.2f MiB RX each",
+        iters,
         static_cast<double>(bytes) / MiB,
         static_cast<double>(bytes) / MiB);
 
-    CUDACHECK(cudaEventRecord(startEvent, stream));
-    NCCLCHECK(ncclGroupStart());
-    NCCLCHECK(ncclSend(d_send, count, ncclFloat, sendPeer, comm, stream));
-    NCCLCHECK(ncclRecv(d_recv, count, ncclFloat, recvPeer, comm, stream));
-    NCCLCHECK(ncclGroupEnd());
-    CUDACHECK(cudaEventRecord(stopEvent, stream));
+    // Log before this barrier to avoid rank skew from progress output.
+    // Match sendrecv_perf -m 1 -z 0 -G 0: one group per iteration,
+    // no intermediate synchronization, and one completion wait at the end.
+    MPICHECK(MPI_Barrier(MPI_COMM_WORLD));
+    auto measurement_start = std::chrono::steady_clock::now();
+    for (int i = 0; i < iters; ++i) {
+        NCCLCHECK(ncclGroupStart());
+        NCCLCHECK(ncclSend(d_send, count, ncclFloat, sendPeer, comm, stream));
+        NCCLCHECK(ncclRecv(d_recv, count, ncclFloat, recvPeer, comm, stream));
+        NCCLCHECK(ncclGroupEnd());
+    }
+    wait_for_transfer(stream, comm);
+    double local_seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - measurement_start).count() / iters;
 
-    LOG("NCCL operations enqueued; waiting for CUDA stop event");
-    CUDACHECK(cudaEventSynchronize(stopEvent));
-
-    float elapsed_ms = 0.0f;
-    CUDACHECK(cudaEventElapsedTime(&elapsed_ms, startEvent, stopEvent));
-    LOG("CUDA event transfer time: %.3f ms", elapsed_ms);
-
-    // Bandwidth per rank. TX+RX is logical bidirectional throughput, not
-    // the aggregate physical-link bandwidth or a sum across all ranks.
-    if (elapsed_ms > 0.0f) {
-        double elapsed_s = static_cast<double>(elapsed_ms) / 1000.0;
-        double tx_mib_s = (static_cast<double>(bytes) / MiB) / elapsed_s;
-        LOG("CUDA event bandwidth: TX=%.2f MiB/s, TX+RX=%.2f MiB/s",
-            tx_mib_s, 2.0 * tx_mib_s);
-    } else {
-        LOG("WARNING: CUDA event interval is 0 ms; bandwidth unavailable");
+    // Match sendrecv_perf -a 1: average the per-iteration times across ranks,
+    // then calculate bandwidth using one sent message (not TX+RX).
+    double sum_seconds = 0.0;
+    MPICHECK(MPI_Allreduce(&local_seconds, &sum_seconds, 1, MPI_DOUBLE,
+                           MPI_SUM, MPI_COMM_WORLD));
+    double average_seconds = sum_seconds / nranks;
+    LOG("Local CPU time: %.3f us/iteration (%d iterations)",
+        local_seconds * 1e6, iters);
+    if (rank == 0 && average_seconds > 0.0) {
+        double bandwidth = static_cast<double>(bytes) / average_seconds / 1e9;
+        LOG("Rank-average CPU time: %.3f us/iteration; TX bandwidth: %.6f GB/s",
+            average_seconds * 1e6, bandwidth);
+    } else if (rank == 0) {
+        LOG("WARNING: CPU timing interval is 0; bandwidth unavailable");
     }
 
     LOG("Copying receive buffer from GPU to host");
@@ -381,9 +418,6 @@ int main(int argc, char** argv) {
     }
     LOG("Validation result: %s", ok ? "OK" : "NG");
 
-    LOG("Destroying CUDA timing events");
-    CUDACHECK(cudaEventDestroy(startEvent));
-    CUDACHECK(cudaEventDestroy(stopEvent));
     LOG("Releasing GPU buffers");
     if (use_nccl_alloc) {
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2, 19, 0)
