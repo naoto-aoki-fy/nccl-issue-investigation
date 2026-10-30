@@ -111,9 +111,10 @@ static bool parse_iteration_count(const char* text, int* count) {
 }
 
 // Match sendrecv_perf's completion polling, including async error checks and
-// yielding the CPU so NCCL proxy threads can make progress.
+// optionally yielding the CPU so NCCL proxy threads can make progress.
 static void wait_for_transfer(cudaStream_t stream, ncclComm_t comm,
-                              const std::string& mode, cudaEvent_t stop_event = nullptr) {
+                              const std::string& mode, bool poll_yield,
+                              cudaEvent_t stop_event = nullptr) {
     if (mode == "stream") {
         CUDACHECK(cudaStreamSynchronize(stream));
         return;
@@ -131,7 +132,7 @@ static void wait_for_transfer(cudaStream_t stream, ncclComm_t comm,
         NCCLCHECK(ncclCommGetAsyncError(comm, &async_error));
         NCCLCHECK(async_error);
 #endif
-        std::this_thread::yield();
+        if (poll_yield) std::this_thread::yield();
     }
 }
 
@@ -152,6 +153,8 @@ static void usage(const char* program) {
         "  --graph-usage-mode VALUE  default, 0, 1 or 2 (default: 0; NCCL 2.29+)\n"
         "  --stream MODE          nonblocking (default) or blocking\n"
         "  --wait MODE            poll (default), stream or event\n"
+        "  --event-blocking-sync VALUE  0 (default) or 1; block CPU in event wait\n"
+        "  --poll-yield VALUE     1 (default) or 0; yield in measurement/warmup polling\n"
         "  --warmup-wait MODE     poll (default) or stream\n"
         "  --pre-log POSITION     before (default) or after the measurement barrier\n"
         "  --timing MODE          cpu (default), event or both\n"
@@ -188,12 +191,13 @@ int main(int argc, char** argv) {
     std::string comm_init = "config", max_peers = "2", nvlink_sched = "1", graph_mode = "0";
     std::string stream_mode = "nonblocking", wait_mode = "poll", warmup_wait = "poll", pre_log = "before";
     std::string timing_mode = "cpu", rank_report = "both";
+    bool event_blocking_sync = false, poll_yield = true;
     bool max_peers_explicit = false, nvlink_explicit = false, graph_explicit = false;
     std::string parse_error;
 
     opterr = 0;
     enum { OPT_COMM_INIT = 256, OPT_MAX_PEERS, OPT_NVLINK, OPT_GRAPH,
-           OPT_STREAM, OPT_WAIT, OPT_WARMUP_WAIT, OPT_PRE_LOG, OPT_TIMING, OPT_RANK_REPORT };
+           OPT_STREAM, OPT_WAIT, OPT_EVENT_BLOCKING_SYNC, OPT_POLL_YIELD, OPT_WARMUP_WAIT, OPT_PRE_LOG, OPT_TIMING, OPT_RANK_REPORT };
     const option long_options[] = {
         {"comm-init", required_argument, nullptr, OPT_COMM_INIT},
         {"max-p2p-peers", required_argument, nullptr, OPT_MAX_PEERS},
@@ -201,6 +205,8 @@ int main(int argc, char** argv) {
         {"graph-usage-mode", required_argument, nullptr, OPT_GRAPH},
         {"stream", required_argument, nullptr, OPT_STREAM},
         {"wait", required_argument, nullptr, OPT_WAIT},
+        {"event-blocking-sync", required_argument, nullptr, OPT_EVENT_BLOCKING_SYNC},
+        {"poll-yield", required_argument, nullptr, OPT_POLL_YIELD},
         {"warmup-wait", required_argument, nullptr, OPT_WARMUP_WAIT},
         {"pre-log", required_argument, nullptr, OPT_PRE_LOG},
         {"timing", required_argument, nullptr, OPT_TIMING},
@@ -275,6 +281,16 @@ int main(int argc, char** argv) {
         case OPT_WAIT:
             wait_mode = optarg;
             if (wait_mode != "poll" && wait_mode != "stream" && wait_mode != "event") parse_error = "invalid --wait (poll, stream or event)";
+            break;
+        case OPT_EVENT_BLOCKING_SYNC:
+            if (std::string(optarg) != "0" && std::string(optarg) != "1")
+                parse_error = "invalid --event-blocking-sync (0 or 1)";
+            else event_blocking_sync = std::string(optarg) == "1";
+            break;
+        case OPT_POLL_YIELD:
+            if (std::string(optarg) != "0" && std::string(optarg) != "1")
+                parse_error = "invalid --poll-yield (0 or 1)";
+            else poll_yield = std::string(optarg) == "1";
             break;
         case OPT_WARMUP_WAIT:
             warmup_wait = optarg;
@@ -359,6 +375,8 @@ int main(int argc, char** argv) {
     LOG("Measurement configuration: iterations=%d timing=%s rank-report=%s wait=%s warmup-wait=%s pre-log=%s stream=%s",
         iters, timing_mode.c_str(), rank_report.c_str(), wait_mode.c_str(),
         warmup_wait.c_str(), pre_log.c_str(), stream_mode.c_str());
+    LOG("Wait configuration: event-blocking-sync=%d poll-yield=%d",
+        static_cast<int>(event_blocking_sync), static_cast<int>(poll_yield));
     LOG("Warmup configuration: %d iterations, %zu bytes (%.2f MiB), elements=%zu float",
         warmup_iters, warmup_bytes, static_cast<double>(warmup_bytes) / MiB, warmup_count);
 
@@ -432,7 +450,10 @@ int main(int argc, char** argv) {
     const bool need_stop_event = measure_event || wait_mode == "event";
     cudaEvent_t start_event = nullptr, stop_event = nullptr;
     if (measure_event) CUDACHECK(cudaEventCreate(&start_event));
-    if (need_stop_event) CUDACHECK(cudaEventCreate(&stop_event));
+    if (need_stop_event) {
+        CUDACHECK(cudaEventCreateWithFlags(&stop_event,
+            event_blocking_sync ? cudaEventBlockingSync : cudaEventDefault));
+    }
 
     float *d_send = nullptr, *d_recv = nullptr;
     // One pair of buffers is reused; allocate enough for either transfer size.
@@ -483,7 +504,7 @@ int main(int argc, char** argv) {
         NCCLCHECK(ncclGroupEnd());
     }
     // Ensure ALL warmup GPU work has finished before starting timing.
-    wait_for_transfer(stream, comm, warmup_wait);
+    wait_for_transfer(stream, comm, warmup_wait, poll_yield);
     if (pre_log == "before") {
         LOG("Starting %d consecutive NCCL transfers: %.2f MiB TX + %.2f MiB RX each",
             iters, static_cast<double>(bytes) / MiB, static_cast<double>(bytes) / MiB);
@@ -506,7 +527,7 @@ int main(int argc, char** argv) {
         NCCLCHECK(ncclGroupEnd());
     }
     if (need_stop_event) CUDACHECK(cudaEventRecord(stop_event, stream));
-    wait_for_transfer(stream, comm, wait_mode, stop_event);
+    wait_for_transfer(stream, comm, wait_mode, poll_yield, stop_event);
     double local_cpu_seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - measurement_start).count() / iters;
     double local_event_seconds = 0.0;
