@@ -589,8 +589,7 @@ void getFloatStr(double value, int width, char* str) {
 }
 
 // Write the performance-related payload to stdout/json.
-// We call this function twice at the top level per test: once for out-of-place, and once for in-place.
-// The Json output assumes out-of-place happens first.
+// Send/Recv reports only out-of-place measurements.
 void writeBenchmarkLineBody(double timeUsec, double algBw, double busBw, bool reportErrors, int64_t wrongElts, bool report_cputime, bool report_timestamps, bool out_of_place) {
   char timeStr[8];
   getFloatStr(timeUsec, 7, timeStr);
@@ -607,7 +606,7 @@ void writeBenchmarkLineBody(double timeUsec, double algBw, double busBw, bool re
     PRINT("  %7s  %6s  %6s    N/A", timeStr, algBwStr, busBwStr);
   }
 
-  if (!out_of_place && report_timestamps && !per_iter_timing) writeTimestamp();
+  if (report_timestamps && !per_iter_timing) writeTimestamp();
 
   if(write_json) {
     jsonKey(out_of_place ? "out_of_place" : "in_place");
@@ -841,43 +840,41 @@ void writeResultHeader(bool report_cputime, bool report_timestamps) {
   const char* timeStr = report_cputime ? "cputime" : "time";
   PRINT("#\n");
   if (per_iter_timing) {
-    PRINT("# %10s  %12s  %8s  %6s  %6s              out-of-place (+ per-iteration)                                in-place (+ per-iteration)%*s",
+    PRINT("# %10s  %12s  %8s  %6s  %6s              out-of-place (+ per-iteration)%*s",
           "", "", "", "", "", tsPad, "");
     if (tuning) {
       PRINT("%87s%44s", "tuning", "");
     }
     PRINT("\n");
-    PRINT("# %10s  %12s  %8s  %6s  %6s  %7s  %6s  %6s  %6s  %7s  %7s  %7s  %7s  %7s  %6s  %6s  %6s  %7s  %7s  %7s  %7s%*s",
+    PRINT("# %10s  %12s  %8s  %6s  %6s  %7s  %6s  %6s  %6s  %7s  %7s  %7s  %7s%*s",
           "size", "count", "type", "redop", "root",
-          timeStr, "algbw", "busbw", "#wrong", "i_min", "i_max", "i_p99", "i_cv%",
           timeStr, "algbw", "busbw", "#wrong", "i_min", "i_max", "i_p99", "i_cv%", tsPad, tsLbl);
     if (tuning) {
       PRINT("  %-4s  %-14s  %-8s  %-18s  %-8s  %-9s  %-6s  %-12s", "impl", "algo", "proto", "kernelVariant", "sync", "#channels", "#warps", "netChunkSize");
     }
     PRINT("\n");
-    PRINT("# %10s  %12s  %8s  %6s  %6s  %7s  %6s  %6s  %6s  %7s  %7s  %7s  %7s  %7s  %6s  %6s  %6s  %7s  %7s  %7s  %7s%*s",
+    PRINT("# %10s  %12s  %8s  %6s  %6s  %7s  %6s  %6s  %6s  %7s  %7s  %7s  %7s%*s",
           "(B)", "(elements)", "", "", "",
-          "(us)", "(GB/s)", "(GB/s)", "", "(us)", "(us)", "(us)", "(%)",
           "(us)", "(GB/s)", "(GB/s)", "", "(us)", "(us)", "(us)", "(%)", tsPad, tsFmt);
     if (tuning) {
       PRINT("  %-4s  %-14s  %-8s  %-18s  %-8s  %-9s  %-6s  %-12s", "", "", "", "", "", "", "", "");
     }
     PRINT("\n");
   } else {
-    PRINT("# %10s  %12s  %8s  %6s  %6s           out-of-place                       in-place%*s",
+    PRINT("# %10s  %12s  %8s  %6s  %6s           out-of-place%*s",
           "", "", "", "", "", tsPad, "");
     if (tuning) {
       PRINT("%63s%44s", "tuning", "");
     }
     PRINT("\n");
-    PRINT("# %10s  %12s  %8s  %6s  %6s  %7s  %6s  %6s  %6s  %7s  %6s  %6s  %6s%*s", "size", "count", "type", "redop", "root",
-          timeStr, "algbw", "busbw", "#wrong", timeStr, "algbw", "busbw", "#wrong", tsPad, tsLbl);
+    PRINT("# %10s  %12s  %8s  %6s  %6s  %7s  %6s  %6s  %6s%*s", "size", "count", "type", "redop", "root",
+          timeStr, "algbw", "busbw", "#wrong", tsPad, tsLbl);
     if (tuning) {
       PRINT("  %-4s  %-14s  %-8s  %-18s  %-8s  %-9s  %-6s  %-12s", "impl", "algo", "proto", "kernelVariant", "sync", "#channels", "#warps", "netChunkSize");
     }
     PRINT("\n");
-    PRINT("# %10s  %12s  %8s  %6s  %6s  %7s  %6s  %6s  %6s  %7s  %6s  %6s  %6s%*s", "(B)", "(elements)", "", "", "",
-          "(us)", "(GB/s)", "(GB/s)", "", "(us)", "(GB/s)", "(GB/s)", "", tsPad, tsFmt);
+    PRINT("# %10s  %12s  %8s  %6s  %6s  %7s  %6s  %6s  %6s%*s", "(B)", "(elements)", "", "", "",
+          "(us)", "(GB/s)", "(GB/s)", "", tsPad, tsFmt);
     if (tuning) {
       PRINT("  %-4s  %-14s  %-8s  %-18s  %-8s  %-9s  %-6s  %-12s", "", "", "", "", "", "", "", "");
     }

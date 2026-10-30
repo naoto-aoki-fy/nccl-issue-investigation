@@ -15,23 +15,31 @@ void SendRecvGetCollByteCount(size_t *sendcount, size_t *recvcount, size_t *para
   *paramcount = *sendcount;
 }
 
-testResult_t SendRecvInitData(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t op, int root, int rep, int in_place) {
-  size_t sendcount = args->sendBytes / wordSize(type);
-  size_t recvcount = args->expectedBytes / wordSize(type);
-  int nranks = args->nProcs*args->nThreads*args->nGpus;
+__global__ void fillSendRecvPattern(unsigned char* data, size_t bytes, int rank, int rep) {
+  for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < bytes; i += (size_t)gridDim.x * blockDim.x) {
+    unsigned long long x = (unsigned long long)i ^ ((unsigned long long)(unsigned int)rank << 32) ^ (unsigned int)rep;
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    data[i] = (unsigned char)x;
+  }
+}
 
-  for (int i=0; i<args->nGpus; i++) {
+testResult_t SendRecvInitData(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t op, int root, int rep, int in_place) {
+  int nranks = args->nProcs * args->nGpus;
+  for (int i = 0; i < args->nGpus; i++) {
     CUDACHECK(cudaSetDevice(args->gpus[i]));
-    int rank = ((args->proc*args->nThreads + args->thread)*args->nGpus + i);
+    int rank = args->proc * args->nGpus + i;
+    int peer = (rank - 1 + nranks) % nranks;
     CUDACHECK(cudaMemset(args->recvbuffs[i], 0, args->expectedBytes));
-    void* data = in_place ? args->recvbuffs[i] : args->sendbuffs[i];
-    TESTCHECK(InitData(data, sendcount, rank*sendcount, type, ncclSum, rep, 1, 0));
-    int peer = (rank-1+nranks)%nranks;
-    TESTCHECK(InitData(args->expected[i], recvcount, peer*recvcount, type, ncclSum, rep, 1, 0));
+    if (args->sendBytes) {
+      fillSendRecvPattern<<<256, 256>>>((unsigned char*)args->sendbuffs[i], args->sendBytes, rank, rep);
+      fillSendRecvPattern<<<256, 256>>>((unsigned char*)args->expected[i], args->expectedBytes, peer, rep);
+      CUDACHECK(cudaGetLastError());
+    }
     CUDACHECK(cudaDeviceSynchronize());
   }
-  // We don't support in-place sendrecv
-  args->reportErrors = in_place ? 0 : 1;
+  args->reportErrors = 1;
   return testSuccess;
 }
 
@@ -117,7 +125,7 @@ testResult_t SendRecvRunColl(void* sendbuff, size_t sendoffset, void* recvbuff, 
 }
 
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2,14,0)
-static void SendRecvInitCommConfig(ncclConfig_t* config) {
+void SendRecvInitCommConfig(ncclConfig_t* config) {
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2,30,0)
   // Ring sendrecv uses two distinct peers per rank (send to rank+1, recv from rank-1).
   config->maxP2pPeers = 2;
@@ -127,21 +135,12 @@ static void SendRecvInitCommConfig(ncclConfig_t* config) {
 }
 #endif
 
-struct testColl sendRecvTest = {
-  "SendRecv",
-  SendRecvGetCollByteCount,
-  SendRecvInitData,
-  SendRecvGetBw,
-  SendRecvRunColl
-};
-
 void SendRecvGetBuffSize(size_t *sendcount, size_t *recvcount, size_t count, int nranks) {
   size_t paramcount, sendInplaceOffset, recvInplaceOffset;
   SendRecvGetCollByteCount(sendcount, recvcount, &paramcount, &sendInplaceOffset, &recvInplaceOffset, count, /*eltSize=*/1, nranks);
 }
 
 testResult_t SendRecvRunTest(struct threadArgs* args, int root, ncclDataType_t type, const char* typeName, ncclRedOp_t op, const char* opName) {
-  args->collTest = &sendRecvTest;
   ncclDataType_t *run_types;
   ncclRedOp_t *run_ops;
   const char **run_typenames, **run_opnames;
@@ -174,11 +173,3 @@ testResult_t SendRecvRunTest(struct threadArgs* args, int root, ncclDataType_t t
   }
   return testSuccess;
 }
-
-NCCL_WEAK struct testEngine ncclTestEngine = {
-  /* .getBuffSize = */ SendRecvGetBuffSize,
-  /* .runTest = */ SendRecvRunTest,
-#if NCCL_VERSION_CODE >= NCCL_VERSION(2,14,0)
-  /* .initCommConfig = */ SendRecvInitCommConfig,
-#endif
-};

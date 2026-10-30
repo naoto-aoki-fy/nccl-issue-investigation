@@ -62,7 +62,7 @@ mkdir -p -- "$BUILDDIR/obj/include"
 version=$(git -C "$root" describe --dirty --always --exclude '*' 2>/dev/null || echo unknown)
 printf '#define NCCL_TESTS_GIT_VERSION "%s"\n' "$version" > "$BUILDDIR/obj/include/nccl_tests_git_version.h"
 objects=()
-for source in src/sendrecv.cu src/common.cu src/util.cu verifiable/verifiable.cu; do
+for source in src/sendrecv.cu src/common.cu src/util.cu; do
   object="$BUILDDIR/obj/$(basename "${source%.cu}").o"
   printf 'Compiling %s\n' "$source"
   "$NVCC" -ccbin "$CXX" "${flags[@]}" "${gencode[@]}" --extended-lambda --expt-relaxed-constexpr \

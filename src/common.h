@@ -112,42 +112,15 @@ typedef enum {
   }                                                 \
 } while(0)
 
-struct testColl {
-  const char name[20];
-  void (*getCollByteCount)(
-      size_t *sendcount, size_t *recvcount, size_t *paramcount,
-      size_t *sendInplaceOffset, size_t *recvInplaceOffset,
-      size_t count, size_t eltSize, int nranks);
-  testResult_t (*initData)(struct threadArgs* args, ncclDataType_t type,
-      ncclRedOp_t op, int root, int rep, int in_place);
-  void (*getBw)(size_t count, size_t typesize, double sec, double* algBw, double* busBw, int nranks);
-  testResult_t (*runColl)(void* sendbuff, size_t sendoffset, void* recvbuff, size_t recvoffset,
-      size_t count, ncclDataType_t type, ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream, int implIndex);
-};
-extern struct testColl allReduceTest;
-extern struct testColl allGatherTest;
-extern struct testColl reduceScatterTest;
-extern struct testColl broadcastTest;
-extern struct testColl reduceTest;
-extern struct testColl alltoAllTest;
+testResult_t SendRecvInitData(struct threadArgs*, ncclDataType_t, ncclRedOp_t, int, int, int);
+void SendRecvGetBw(size_t, size_t, double, double*, double*, int);
+testResult_t SendRecvRunColl(void*, size_t, void*, size_t, size_t, ncclDataType_t, ncclRedOp_t, int, ncclComm_t, cudaStream_t, int);
 
-struct testEngine {
-  void (*getBuffSize)(size_t *sendcount, size_t *recvcount, size_t count, int nranks);
-  testResult_t (*runTest)(struct threadArgs* args, int root, ncclDataType_t type,
-      const char* typeName, ncclRedOp_t op, const char* opName);
+void SendRecvGetBuffSize(size_t*, size_t*, size_t, int);
+testResult_t SendRecvRunTest(struct threadArgs*, int, ncclDataType_t, const char*, ncclRedOp_t, const char*);
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2,14,0)
-  /* Optional; called from initComms after common fields are set on ncclConfig_t. */
-  void (*initCommConfig)(ncclConfig_t* config);
+void SendRecvInitCommConfig(ncclConfig_t*);
 #endif
-
-#if NCCL_VERSION_CODE >= NCCL_VERSION(2,29,0)
-  testResult_t (*getDevCommRequirements)(int deviceImpl, ncclDevCommRequirements* reqs, ncclComm_t comm);
-#elif NCCL_VERSION_CODE >= NCCL_VERSION(2,28,0)
-  bool (*getDevCommRequirements)(int deviceImpl, ncclDevCommRequirements* reqs);
-#endif
-};
-
-extern struct testEngine ncclTestEngine;
 
 struct threadArgs {
   size_t nbytes;
@@ -186,7 +159,6 @@ struct threadArgs {
 
   int reportErrors;
 
-  struct testColl* collTest;
 
   int64_t* initGpuMem;
   int64_t* bufferMemory;
@@ -209,8 +181,6 @@ struct testThread {
 // Provided by common.cu
 extern void Barrier(struct threadArgs* args);
 extern testResult_t TimeTest(struct threadArgs* args, ncclDataType_t type, const char* typeName, ncclRedOp_t op,  const char* opName, int root);
-extern testResult_t InitDataReduce(void* data, const size_t count, const size_t offset, ncclDataType_t type, ncclRedOp_t op, const uint64_t seed, const int nranks);
-extern testResult_t InitData(void* data, const size_t count, size_t offset, ncclDataType_t type, ncclRedOp_t op, const uint64_t seed, const int nranks, const int rank);
 extern testResult_t AllocateBuffs(void **sendbuff, size_t sendBytes, void **recvbuff, size_t recvBytes, void **expected, size_t nbytes, size_t *allocBytes);
 
 static void getHostName(char* hostname, int maxlen) {
