@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build only sendrecv_perf on Linux, without Make or CMake.
+# Build sendrecv_perf and, with MPI=1, sample on Linux without Make or CMake.
 set -euo pipefail
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -77,3 +77,11 @@ for source in src/timer.cc os/linux.cc; do
 done
 "$NVCC" -ccbin "$CXX" "${objects[@]}" "${libs[@]}" -Xlinker --export-dynamic -o "$BUILDDIR/sendrecv_perf"
 printf 'Built %s/sendrecv_perf\n' "$BUILDDIR"
+if [[ $MPI == 1 ]]; then
+  printf 'Compiling src/sample.cu\n'
+  "$NVCC" -ccbin "$CXX" "${flags[@]}" "${gencode[@]}" -Xcompiler -pthread \
+    "$root/src/sample.cu" "${libs[@]}" -o "$BUILDDIR/sample"
+  printf 'Built %s/sample\n' "$BUILDDIR"
+else
+  printf 'Skipping sample (requires MPI=1 and MPI_HOME).\n'
+fi

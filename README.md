@@ -1,6 +1,7 @@
 # NCCL Send/Receive Performance Test
 
-This repository builds only `sendrecv_perf`. Each rank sends to the next rank
+This repository builds `sendrecv_perf` and, with MPI enabled, `sample` from
+`src/sample.cu`. Each rank sends to the next rank
 and receives from the previous rank in a ring. The shared timing, validation,
 profiling, and JSON output code is retained.
 
@@ -29,7 +30,7 @@ Environment variables:
 | `NCCL_HOME` | unset | NCCL installation |
 | `BUILDDIR` | repository `build/` | Output directory; relative paths use the current directory |
 | `CUDA_ARCHS` | selected by CUDA version | Space-separated GPU architecture numbers, e.g. `80 90` |
-| `MPI` | `0` | Set to `1` to enable MPI |
+| `MPI` | `0` | Set to `1` to enable MPI and also build `sample` |
 | `MPI_HOME` | unset | MPI installation with `include` and `lib` or `lib64`; required for `MPI=1` |
 
 To build for a specific GPU architecture:
@@ -60,6 +61,16 @@ For MPI (one GPU per process):
 MPI=1 MPI_HOME=/path/to/mpi NCCL_HOME=/path/to/nccl ./build.sh
 /path/to/mpi/bin/mpirun -np 2 ./build/sendrecv_perf -b 8 -e 128M -f 2 -g 1
 ```
+
+The same build also produces `build/sample`, a standalone send/receive sample
+that requires at least two MPI ranks and one GPU per local rank:
+
+```sh
+/path/to/mpi/bin/mpirun -np 2 ./build/sample -s 4M -w 1
+```
+
+The sample defaults to NCCL buffer allocation (NCCL 2.19+); use `-A cuda` to
+allocate buffers with CUDA instead. With `MPI=0`, the sample is skipped.
 
 For multiple nodes, deploy the executable and libraries to each node and configure
 your MPI launcher and GPU visibility for the cluster. MPI libraries must also be
