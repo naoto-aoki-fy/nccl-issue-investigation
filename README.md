@@ -95,6 +95,49 @@ the same nonblocking stream and normal non-graph communicator settings as
 multi-node InfiniBand communication). Compare its `Rank-average CPU time` and
 `TX bandwidth` with the benchmark's `time` and `algbw`/`busbw` columns.
 
+The following sample options allow one change at a time to be compared. The first
+value shown is the default; `default` in a communicator field leaves that field
+at the NCCL library default. Explicit settings require the listed NCCL headers.
+Environment variables may override communicator settings.
+
+| Option | Values | Purpose |
+| --- | --- | --- |
+| `--comm-init` | `config`, `rank` | Initialize with `ncclCommInitRankConfig` or `ncclCommInitRank` (library defaults). Config requires NCCL 2.14+; older headers use rank initialization. |
+| `--max-p2p-peers` | `2`, `default`, or `1..nranks` | Limit concurrent P2P peers (NCCL 2.30+). |
+| `--nvlink-centric-sched` | `1`, `default`, `0` | Set NVLink-centric scheduling (NCCL 2.28+). |
+| `--graph-usage-mode` | `0`, `default`, `1`, `2` | Set communicator graph usage mode (NCCL 2.29+). |
+| `--stream` | `nonblocking`, `blocking` | Set CUDA stream flags; `blocking` creates a regular stream. |
+| `--wait` | `poll`, `stream`, `event` | Wait after measurement via stream query and yield, `cudaStreamSynchronize`, or `cudaEventSynchronize`. Event wait records a stop event even in CPU timing mode. |
+| `--warmup-wait` | `poll`, `stream` | Select the completion wait after warmup. |
+| `--pre-log` | `before`, `after` | Place the measurement-start log before or after the measurement barrier. The log is outside the local CPU timing interval. |
+| `--timing` | `cpu`, `event`, `both` | Report CPU wall-clock time, CUDA event time, or both. Event time spans all measured iterations and is divided by `-n`. |
+| `--rank-report` | `both`, `average`, `per-rank` | Print rank-average timing, per-rank timing and TX/TX+RX bandwidth, or both. |
+
+`--comm-init rank` uses NCCL's defaults and cannot be combined with explicit
+communicator field options. On older NCCL headers, unsupported fields use the
+library default; explicitly setting an unsupported field to a non-default value
+is an error. When CUDA event timing is enabled, recording events also adds work
+to the CPU-timed region. A stop event used for `--wait event` similarly adds
+instrumentation even with `--timing cpu`.
+
+For example, compare the baseline with individual changes (use the same MPI
+launcher, placement, and environment for every run):
+
+```sh
+mpirun -np 2 ./build/sample -s 4M -w 20 -n 1
+mpirun -np 2 ./build/sample -s 4M -w 20 -n 1 --wait stream
+mpirun -np 2 ./build/sample -s 4M -w 20 -n 1 --pre-log after
+mpirun -np 2 ./build/sample -s 4M -w 20 -n 1 --max-p2p-peers default
+mpirun -np 2 ./build/sample -s 4M -w 20 -n 1 --timing both
+```
+
+The peer setting has the same effective value for two ranks in NCCL 2.30.4;
+use the original multi-node rank count when investigating that setting. To
+approximate the earlier sample's settings together, use `-n 1 --comm-init rank
+--stream blocking --warmup-wait stream --wait event --pre-log after --timing event
+--rank-report per-rank`. The measurement-start log is not identical to the old
+version, so compare against the old executable when exact reproduction matters.
+
 For multiple nodes, deploy the executable and libraries to each node and configure
 your MPI launcher and GPU visibility for the cluster. MPI libraries must also be
 available to the runtime loader.
